@@ -2,10 +2,37 @@ import bz2
 import hashlib
 from collections import defaultdict
 import sys
+import os
+import time
+from tqdm import tqdm
 
 def hash_uri(uri, num_partitions=10):
     """Hash cohérent pour assigner une URI à une partition"""
     return int(hashlib.md5(uri.encode('utf-8')).hexdigest(), 16) % num_partitions
+
+def estimate_lines(input_file):
+    """Estime le nombre de lignes dans le fichier compressé"""
+    print("📊 Estimation de la taille du fichier...")
+    
+    # Lire un échantillon pour estimer
+    sample_lines = 0
+    sample_bytes = 0
+    max_sample = 10 * 1024 * 1024  # 10 MB échantillon
+    
+    with bz2.open(input_file, 'rb') as f:
+        while sample_bytes < max_sample:
+            chunk = f.read(1024 * 1024)  # 1 MB à la fois
+            if not chunk:
+                break
+            sample_bytes += len(chunk)
+            sample_lines += chunk.count(b'\n')
+    
+    # Estimer le total basé sur la taille du fichier
+    file_size = os.path.getsize(input_file)
+    if sample_bytes > 0:
+        estimated_lines = int((file_size / sample_bytes) * sample_lines)
+        return estimated_lines
+    return None
 
 def partition_ttl_stream(input_file, output_prefix, sample_rate=0.1, num_partitions=10):
     """
@@ -25,22 +52,40 @@ def partition_ttl_stream(input_file, output_prefix, sample_rate=0.1, num_partiti
     # Statistiques
     total_triples = 0
     sampled_subjects = set()
+    start_time = time.time()
     
-    print(f"Traitement de {input_file}...")
-    print(f"Échantillonnage: {sample_rate*100}%, Partitions: {num_partitions}")
+    print(f"🚀 Traitement de {input_file}")
+    print(f"   Échantillonnage: {sample_rate*100}%, Partitions: {num_partitions}")
+    
+    # Estimation du nombre de lignes
+    estimated_lines = estimate_lines(input_file)
+    if estimated_lines:
+        print(f"   Lignes estimées: {estimated_lines:,}")
+        print(f"   Temps estimé: {estimated_lines / 100000 * 1.5:.1f} secondes\n")
     
     try:
         # Ouvrir les fichiers de sortie
         for i in range(num_partitions):
             partition_files[i] = open(f"{output_prefix}_partition_{i}.ttl", 'w', encoding='utf-8')
         
+        # Barre de progression
+        pbar = tqdm(
+            total=estimated_lines if estimated_lines else None,
+            desc="Traitement",
+            unit=" lignes",
+            unit_scale=True,
+            smoothing=0.1
+        )
+        
         with bz2.open(input_file, 'rt', encoding='utf-8') as f:
             current_subject = None
             subject_partition = None
             subject_lines = []
+            last_update = time.time()
             
             for line in f:
                 total_triples += 1
+                pbar.update(1)
                 
                 # Ignorer les commentaires et lignes vides
                 if line.startswith('#') or line.strip() == '':
@@ -71,24 +116,36 @@ def partition_ttl_stream(input_file, output_prefix, sample_rate=0.1, num_partiti
                     if current_subject in sampled_subjects:
                         subject_lines.append(line)
                 
-                # Affichage progression
-                if total_triples % 100000 == 0:
-                    print(f"Traité {total_triples:,} triplets, "
-                          f"{len(sampled_subjects):,} sujets échantillonnés")
+                # Mise à jour de la description toutes les secondes
+                current_time = time.time()
+                if current_time - last_update > 1.0:
+                    rate = total_triples / (current_time - start_time)
+                    pbar.set_postfix({
+                        'sujets': len(sampled_subjects),
+                        'vitesse': f'{rate:.0f} l/s'
+                    })
+                    last_update = current_time
             
             # Traiter le dernier sujet
             if current_subject and subject_lines and current_subject in sampled_subjects:
                 partition_files[subject_partition].writelines(subject_lines)
+        
+        pbar.close()
     
     finally:
         # Fermer tous les fichiers
         for f in partition_files.values():
             f.close()
     
-    print(f"\n✓ Terminé!")
-    print(f"Total triplets traités: {total_triples:,}")
-    print(f"Sujets échantillonnés: {len(sampled_subjects):,}")
-    print(f"Taux réel: {len(sampled_subjects)/total_triples*100:.2f}%")
+    # Calcul du temps écoulé
+    elapsed_time = time.time() - start_time
+    
+    print(f"\n✅ Terminé en {elapsed_time:.1f} secondes ({elapsed_time/60:.1f} minutes)")
+    print(f"   Vitesse moyenne: {total_triples/elapsed_time:.0f} lignes/seconde")
+    print(f"\n📈 Statistiques:")
+    print(f"   Total triplets traités: {total_triples:,}")
+    print(f"   Sujets échantillonnés: {len(sampled_subjects):,}")
+    print(f"   Taux réel: {len(sampled_subjects)/total_triples*100:.2f}%")
     
     # Afficher la taille de chaque partition
     print("\nDistribution des partitions:")
