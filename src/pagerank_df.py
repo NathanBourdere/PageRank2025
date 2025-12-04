@@ -1,63 +1,56 @@
 #!/usr/bin/env python3
-import argparse, time, os, tempfile, subprocess
+import argparse
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import split, col, size, explode, lit, sum as _sum, collect_list
-from pyspark.sql import functions as F
+from pyspark.sql.functions import col, regexp_extract, explode, size, lit, collect_list
 
-def parse_pairs_df(spark, input_path):
-    raw = spark.read.text(input_path)
-    pairs = raw.select(split(col("value"), "\\s+").alias("parts")) \
-               .filter(F.size("parts") >= 3) \
-               .select(col("parts").getItem(0).alias("src"), col("parts").getItem(2).alias("dst"))
-    pairs = pairs.dropDuplicates()
-    return pairs
+def clean_uri(uri):
+    return uri[uri.rfind("/") + 1 : ]
 
-def write_topk_df(df_topk, out_gcs):
-    # collect small topk to driver and write with gsutil
-    rows = df_topk.collect()
-    tf = tempfile.NamedTemporaryFile(delete=False, mode="w")
-    for r in rows:
-        tf.write(f"{r['id']}\t{r['rank']}\n")
-    tf.close()
-    dest = os.path.join(out_gcs, "pagerank_topk.tsv")
-    subprocess.check_call(["gsutil", "cp", tf.name, dest])
-    os.unlink(tf.name)
-
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--iterations", type=int, default=10)
-    parser.add_argument("--partitions", type=int, default=200)
-    parser.add_argument("--topk", type=int, default=50)
     args = parser.parse_args()
 
-    spark = SparkSession.builder.appName("PageRank-DataFrame").getOrCreate()
-    spark.conf.set("spark.sql.adaptive.enabled", "true")
+    spark = SparkSession.builder.appName("PageRankDF").getOrCreate()
 
-    t0 = time.time()
-    pairs = parse_pairs_df(spark, args.input)
-    # repartition by src to align adjacency and ranks (avoid shuffle on join)
-    adj = pairs.repartition(args.partitions, "src").groupBy("src").agg(collect_list("dst").alias("neighbors")).cache()
-    # start ranks
-    ranks = adj.select(col("src").alias("id")).withColumn("rank", lit(1.0)).cache()
+    df = spark.read.text(args.input)
 
-    for i in range(args.iterations):
-        # join on src==id; since adj and ranks are partitioned by 'src' they will colocate partitions
-        exploded = adj.join(ranks, adj.src == ranks.id)\
-                      .select(F.explode("neighbors").alias("dst"), col("rank"), F.size("neighbors").alias("deg"))
-        contribs = exploded.groupBy("dst").agg(_sum(col("rank") / col("deg")).alias("sumr"))
-        ranks = contribs.select(col("dst").alias("id"), (lit(0.15) + lit(0.85) * col("sumr")).alias("rank")).cache()
+    # Extract 1st, 2nd, 3rd <...> blocks
+    parsed = df.select(
+        regexp_extract("value", r"<([^>]*)>", 1).alias("src_full"),
+        regexp_extract("value", r"<([^>]*)>.*<([^>]*)>", 2).alias("pred_full"),
+        regexp_extract("value", r"<([^>]*)>.*<([^>]*)>.*<([^>]*)>", 3).alias("dst_full")
+    )
 
-    t_end = time.time()
-    topk_df = ranks.orderBy(col("rank").desc()).limit(args.topk)
-    topk_df.show(20, False)
+    # Clean URIs to keep last part only
+    links = links.selectExpr(
+        "regexp_extract(src_full, '.*/([^/]*)$', 1) as src",
+        "regexp_extract(dst_full, '.*/([^/]*)$', 1) as dst"
+    )
 
-    # write ranks (careful, global ranks can be large; here we write full ranks if needed)
-    ranks.write.mode("overwrite").csv(os.path.join(args.output, "ranks_df"))
+    links = links.distinct()
 
-    # write small topk using gsutil
-    write_topk_df(topk_df, args.output)
+    # Build adjacency list
+    adj = links.groupBy("src").agg(collect_list("dst").alias("outlinks")).cache()
 
-    print("build+iter_time_s:", t_end - t0)
+    ranks = adj.select(col("src").alias("node"), lit(1.0).alias("rank"))
+
+    for i in range(10):
+        contribs = adj.join(ranks, adj.src == ranks.node) \
+            .select(
+                explode("outlinks").alias("dst"),
+                (col("rank") / size("outlinks")).alias("contrib")
+            )
+        ranks = contribs.groupBy("dst").sum("contrib") \
+            .select(
+                col("dst").alias("node"),
+                (lit(0.15) + lit(0.85) * col("sum(contrib)")).alias("rank")
+            )
+
+    ranks.write.mode("overwrite").csv(args.output)
     spark.stop()
+
+
+if __name__ == "__main__":
+    main()

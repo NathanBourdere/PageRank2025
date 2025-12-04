@@ -1,155 +1,171 @@
 #!/usr/bin/env bash
+# Pipeline multi-cluster Dataproc pour exécuter PageRank (RDD ou DataFrame)
+# - Nombre de clusters configurable
+# - Exécute un job PySpark par cluster
+# - Sauvegarde les résultats dans GCS
+# - Supprime TOUS les clusters même en cas d’erreur
+
 set -euo pipefail
 
-VARIANT="$1"
-shift
-PROJECT_ID=""
-BUCKET=""
-CLUSTER_BASE="pagerank-dp"
-REGION="europe-west1"
-ZONE="europe-west1-b"
-IMAGE_VERSION="2.2-debian12"
-MACHINE_TYPE="n1-standard-4"
-NODES_LIST=(2 4 6)
-LOCAL_RESULTS_DIR="results"
-JOBS_DIR_LOCAL="src"
-TOPK=50
-PARTITIONS=200
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --project) PROJECT_ID="$2"; shift 2;;
-    --bucket) BUCKET="$2"; shift 2;;
-    --clusters) IFS=',' read -r -a NODES_LIST <<< "$2"; shift 2;;
-    --machine-type) MACHINE_TYPE="$2"; shift 2;;
-    --image) IMAGE_VERSION="$2"; shift 2;;
-    --partitions) PARTITIONS="$2"; shift 2;;
-    --topk) TOPK="$2"; shift 2;;
-    *) echo "Unknown arg: $1"; exit 1;;
-  esac
-done
-
-if [[ -z "$PROJECT_ID" || -z "$BUCKET" ]]; then
-  echo "Usage: $0 <rdd|df> --project PROJECT_ID --bucket BUCKET_NAME"
-  exit 1
+###########################
+# Chargement optionnel .env
+###########################
+if [ -f ".env" ]; then
+  # shellcheck disable=SC1091
+  source .env
 fi
 
-INPUT_PATH="gs://${BUCKET}/sample10pct.ttl"
-GCS_JOB_DIR="gs://${BUCKET}/jobs"
+###########################
+# Defaults (si non overridés par .env)
+###########################
+PROJECT_ID="${PROJECT_ID:-pagerank2025-nathan}"
+BUCKET="${BUCKET:-pagerank2025-nathan-bucket}"
+REGION="${REGION:-europe-west1}"
+ZONE="${ZONE:-europe-west1}"
+IMAGE_VERSION="${IMAGE_VERSION:-2.1-debian11}"
 
-JOB_LOCAL_PATH="$JOBS_DIR_LOCAL/pagerank_${VARIANT}.py"
-JOB_GCS_PATH="$GCS_JOB_DIR/pagerank_${VARIANT}.py"
+# Paramètres pipeline
+NUM_CLUSTERS="${NUM_CLUSTERS:-3}"     # <--- nombre de clusters à créer
+MODE="${MODE:-df}"                   # "rdd" ou "df"
+INPUT_PATH="gs://${BUCKET}/data/wikilinks_lang=en.ttl.bz2"
 
-mkdir -p "$LOCAL_RESULTS_DIR"
-echo "Uploading job $JOB_LOCAL_PATH -> $JOB_GCS_PATH"
-gcloud storage cp "$JOB_LOCAL_PATH" "$JOB_GCS_PATH" --project="$PROJECT_ID"
+# Chemins des jobs
+JOB_RDD="gs://${BUCKET}/jobs/page_rank_rdd.py"
+JOB_DF="gs://${BUCKET}/jobs/page_rank_df.py"
 
-CLUSTERS_TO_DELETE=()
+BASE_OUTPUT="gs://${BUCKET}/outputs/pagerank-$(date +%s)"
+
+# Liste des clusters créés
+CLUSTERS=()
+
+TMPDIR="$(mktemp -d)"
+
+#################################
+# Cleanup sur exit (réussite/err)
+#################################
 cleanup() {
-  for c in "${CLUSTERS_TO_DELETE[@]}"; do
-    echo "Deleting cluster $c..."
-    gcloud dataproc clusters delete "$c" --region="$REGION" --project="$PROJECT_ID" --quiet || true
+  echo ""
+  echo "===== CLEANUP ====="
+  rm -rf "$TMPDIR"
+
+  for CL in "${CLUSTERS[@]}"; do
+    echo "Suppression du cluster : $CL"
+    gcloud dataproc clusters delete "$CL" \
+        --region="$REGION" --project="$PROJECT_ID" --quiet || true
   done
 }
 trap cleanup EXIT
 
-create_cluster() {
-  local total_nodes=$1
-  local cluster_name="$CLUSTER_BASE-${VARIANT}-${total_nodes}nodes"
-  local num_workers=$(( total_nodes > 2 ? total_nodes - 1 : 2 ))  # master + workers
 
-  gcloud dataproc clusters create "$cluster_name" \
-      --project="$PROJECT_ID" \
-      --region="$REGION" \
-      --master-machine-type="$MACHINE_TYPE" \
-      --worker-machine-type="$MACHINE_TYPE" \
-      --num-workers="$num_workers" \
-      --image-version="$IMAGE_VERSION" \
-      --quiet --no-address
+###########################
+# Vérifications basiques
+###########################
+command -v gcloud >/dev/null || { echo "gcloud manquant"; exit 1; }
+command -v gsutil >/dev/null || { echo "gsutil manquant"; exit 1; }
 
-  echo "$cluster_name"  # retourner juste le nom réel
-}
+if [ "$PROJECT_ID" = "YOUR_PROJECT_ID" ] || [ "$BUCKET" = "YOUR_BUCKET_NAME" ]; then
+  echo "⚠️ Configure PROJECT_ID et BUCKET dans .env ou en haut du script."
+  exit 1
+fi
 
-submit_job_async() {
-  local cluster_name="$1"
-  local timestamp=$(date +%s)
-  local out_gcs="gs://${BUCKET}/outputs/${cluster_name}-${VARIANT}-${timestamp}"
 
-  local spark_args=(-- --input "$INPUT_PATH" --output "$out_gcs" --partitions "$PARTITIONS" --topk "$TOPK")
+###########################
+# Bucket
+###########################
+echo "Vérification du bucket gs://${BUCKET}"
+if ! gsutil ls -b "gs://${BUCKET}" >/dev/null 2>&1; then
+  echo "Bucket inexistant -> création"
+  gsutil mb -p "$PROJECT_ID" -l "$REGION" "gs://${BUCKET}"
+else
+  echo "Bucket OK."
+fi
 
-  echo "Submitting pyspark job to cluster $cluster_name, output -> $out_gcs"
+###########################
+# Upload jobs PySpark
+###########################
+echo "Upload des jobs PageRank"
+gsutil cp -n "./src/pagerank_rdd.py" "$JOB_RDD"  || true
+gsutil cp -n "./src/pagerank_df.py" "$JOB_DF"    || true
 
-  local job_id
-  job_id=$(gcloud dataproc jobs submit pyspark "$JOB_GCS_PATH" \
-      --cluster="$cluster_name" \
-      --region="$REGION" \
-      --project="$PROJECT_ID" \
-      --async \
-      --format="value(reference.jobId)" \
-      -- "${spark_args[@]}")
 
-  if [[ -z "$job_id" ]]; then
-    echo "Failed to get job id"; exit 1
-  fi
+###########################
+# Sélection job selon mode
+###########################
+if [ "$MODE" = "rdd" ]; then
+  JOB="$JOB_RDD"
+elif [ "$MODE" = "df" ]; then
+  JOB="$JOB_DF"
+else
+  echo "MODE inconnu : $MODE (utilise 'rdd' ou 'df')"
+  exit 1
+fi
 
-  echo "$job_id|$out_gcs"
-}
+echo "Mode PageRank : $MODE"
+echo "Job utilisé : $JOB"
 
-wait_and_collect() {
-  local job_id="$1"
-  local status_json
-  echo "Waiting for job $job_id..."
-  status_json=$(gcloud dataproc jobs wait "$job_id" --region="$REGION" --project="$PROJECT_ID" --format=json)
-  local status submission_time start_time end_time
-  status=$(echo "$status_json" | jq -r '.status.state')
-  submission_time=$(echo "$status_json" | jq -r '.status.submissionTime')
-  start_time=$(echo "$status_json" | jq -r '.status.startTime')
-  end_time=$(echo "$status_json" | jq -r '.status.doneTime')
-  echo "$status|$submission_time|$start_time|$end_time"
-}
 
-for n in "${NODES_LIST[@]}"; do
-  echo -e "\n==== Running variant=$VARIANT on $n nodes ===="
-  cluster_name=$(create_cluster "$n")
+########################################
+# Création + exécution multi-clusters
+########################################
 
-  res=$(submit_job_async "$cluster_name")
-  job_id=$(echo "$res" | cut -d'|' -f1)
-  out_gcs=$(echo "$res" | cut -d'|' -f2)
+for i in $(seq 1 "$NUM_CLUSTERS"); do
+  CLUSTER_NAME="pagerank-cluster-$i-$(date +%s)"
+  CLUSTERS+=("$CLUSTER_NAME")
 
-  job_meta=$(wait_and_collect "$job_id")
-  status=$(echo "$job_meta" | cut -d'|' -f1)
-  submission_time=$(echo "$job_meta" | cut -d'|' -f2)
-  start_time=$(echo "$job_meta" | cut -d'|' -f3)
-  end_time=$(echo "$job_meta" | cut -d'|' -f4)
-
-  run_dir="$LOCAL_RESULTS_DIR/${cluster_name}"
-  mkdir -p "$run_dir"
-
-  if gsutil -q ls "${out_gcs}/*" 2>/dev/null; then
-    gsutil -m cp -r "${out_gcs}/pagerank_topk*" "$run_dir/" || true
-    gsutil -m cp -r "${out_gcs}/part-*" "$run_dir/" || true
+  # Définir nombre de workers (chaque worker = un nœud)
+  if [ "$i" -eq 1 ]; then
+    NUM_WORKERS=2   # 2 nœuds
+  elif [ "$i" -eq 2 ]; then
+    NUM_WORKERS=4   # 4 nœuds
   else
-    echo "No output files found at ${out_gcs}"
+    NUM_WORKERS=6   # 6 nœuds
   fi
 
-  cat > "$run_dir/metadata.txt" <<EOF
-variant=${VARIANT}
-cluster=${cluster_name}
-nodes=${n}
-machine_type=${MACHINE_TYPE}
-project=${PROJECT_ID}
-bucket=${BUCKET}
-job_id=${job_id}
-status=${status}
-submission_time=${submission_time}
-start_time=${start_time}
-end_time=${end_time}
-output_gcs=${out_gcs}
-partitions=${PARTITIONS}
-topk=${TOPK}
-EOF
+  echo "Création cluster $i/${NUM_CLUSTERS} : $CLUSTER_NAME avec $NUM_WORKERS workers"
 
-  echo "Run for $n nodes complete. Results in $run_dir"
+  gcloud dataproc clusters create "$CLUSTER_NAME" \
+    --project="$PROJECT_ID" \
+    --region="$REGION" \
+    --master-machine-type=e2-standard-4 \
+    --num-workers="$NUM_WORKERS" \
+    --worker-machine-type=e2-medium \
+    --num-workers=1 \
+    --disk-size=50 \
+    --image-version="$IMAGE_VERSION"
+
+    echo "Cluster $i créé."
+
+  ########################################
+  # Exécution du job
+  ########################################
+  OUTPUT_PATH="${BASE_OUTPUT}/cluster_${i}"
+
+  echo "Soumission job PageRank -> output : $OUTPUT_PATH"
+
+  gcloud dataproc jobs submit pyspark "$JOB" \
+      --cluster="$CLUSTER_NAME" \
+      --region="$REGION" \
+      --project="$PROJECT_ID" \
+      -- \
+      --input "$INPUT_PATH" \
+      --output "$OUTPUT_PATH"
+
+  echo "Job terminé pour cluster $i"
 done
 
-echo "All runs finished. Local results directory: $LOCAL_RESULTS_DIR"
+
+########################################
+# Téléchargement des résultats
+########################################
+
+echo ""
+echo "Téléchargement des résultats finaux"
+LOCAL_OUT="outputs/pagerank_multi"
+mkdir -p "$LOCAL_OUT"
+
+gsutil -m cp -r "${BASE_OUTPUT}" "$LOCAL_OUT/"
+
+echo "Résultats disponibles dans : $LOCAL_OUT/"
+
+echo ""
+echo "Pipeline terminé avec succès (tous les clusters seront supprimés par cleanup)"
