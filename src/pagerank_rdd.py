@@ -2,29 +2,6 @@
 import argparse
 from pyspark.sql import SparkSession
 
-def parse_ttl(line):
-    # Example:
-    # <http://dbpedia.org/resource/A> <http://dbpedia.org/ontology/wikiPageWikiLink> <http://dbpedia.org/resource/B> .
-    parts = line.strip().split()
-
-    if len(parts) < 3:
-        return None
-
-    subj = parts[0]
-    pred = parts[1]
-    obj  = parts[2]
-
-    # We only want wikiPageWikiLink
-    if pred != "<http://dbpedia.org/ontology/wikiPageWikiLink>":
-        return None
-
-    # Remove angle brackets, keep last part of URL
-    def clean(uri):
-        return uri[uri.rfind("/") + 1 : ].replace(">", "").replace("<", "")
-
-    return clean(subj), clean(obj)
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
@@ -34,33 +11,45 @@ def main():
     spark = SparkSession.builder.appName("PageRankRDD").getOrCreate()
     sc = spark.sparkContext
 
-    print(f"[RDD] Reading: {args.input}")
-
     lines = sc.textFile(args.input)
 
-    edges = (
-        lines.map(parse_ttl)
-             .filter(lambda x: x is not None)
-             .distinct()
-    )
+    # Extraire src et dst
+    def parse_line(line):
+        parts = line.split('>')
+        if len(parts) >= 3:
+            src = parts[0].strip()[1:].split('/')[-1]
+            pred = parts[1].strip()[1:].split('/')[-1]
+            dst = parts[2].strip()[1:].split('/')[-1]
+            if pred == "wikiPageWikiLink":
+                return (src, dst)
+        return None
 
-    links = edges.groupByKey().cache()
+    edges = lines.map(parse_line).filter(lambda x: x is not None).distinct()
 
-    # init ranks
-    ranks = links.mapValues(lambda _: 1.0)
+    # Tous les nœuds
+    nodes = edges.flatMap(lambda x: [x[0], x[1]]).distinct()
+    ranks = nodes.map(lambda n: (n, 1.0))
 
+    # Construire adjacency list
+    links = edges.groupByKey().mapValues(list)
+
+    # PageRank iterations
     for i in range(10):
-        print(f"Iteration {i+1}/10")
         contribs = links.join(ranks).flatMap(
-            lambda kv: [(dst, kv[1][1] / len(kv[1][0])) for dst in kv[1][0]]
-        )
-        ranks = contribs.reduceByKey(lambda a, b: a + b).mapValues(
-            lambda r: 0.15 + 0.85 * r
+            lambda x: [(dst, x[1][1] / len(x[1][0])) for dst in x[1][0]] if x[1][0] else []
         )
 
-    ranks.saveAsTextFile(args.output)
+        # Ajouter nœuds sans outlinks
+        contribs = contribs.union(
+            nodes.subtract(contribs.keys()).map(lambda n: (n, 0.0))
+        )
+
+        ranks = contribs.reduceByKey(lambda x, y: x + y).mapValues(lambda s: 0.15 + 0.85 * s)
+
+    # Écriture finale
+    ranks.map(lambda x: f"{x[0]},{x[1]}").coalesce(1).saveAsTextFile(args.output)
+
     spark.stop()
-
 
 if __name__ == "__main__":
     main()

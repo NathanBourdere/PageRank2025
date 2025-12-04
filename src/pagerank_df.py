@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, regexp_extract, explode, size, lit, collect_list
-
-def clean_uri(uri):
-    return uri[uri.rfind("/") + 1 : ]
+from pyspark.sql.functions import col, regexp_extract, explode, size, lit, collect_list, coalesce, when, array
 
 def main():
     parser = argparse.ArgumentParser()
@@ -16,46 +13,46 @@ def main():
 
     df = spark.read.text(args.input)
 
-    # Extract 1st, 2nd, 3rd <...> blocks
+    # Extraire src/pred/dst
     parsed = df.select(
         regexp_extract("value", r"<([^>]*)>", 1).alias("src_full"),
         regexp_extract("value", r"<([^>]*)>.*<([^>]*)>", 2).alias("pred_full"),
         regexp_extract("value", r"<([^>]*)>.*<([^>]*)>.*<([^>]*)>", 3).alias("dst_full")
     )
 
-    # Keep only wikiPageWikiLink predicate
+    # Filtrer uniquement wikiPageWikiLink
     links = parsed.filter(
         col("pred_full") == "http://dbpedia.org/ontology/wikiPageWikiLink"
-    )
-
-    # Clean URIs to keep last part only
-    links = links.selectExpr(
+    ).selectExpr(
         "regexp_extract(src_full, '.*/([^/]*)$', 1) as src",
         "regexp_extract(dst_full, '.*/([^/]*)$', 1) as dst"
-    )
+    ).distinct()
 
-    links = links.distinct()
+    # Tous les nœuds uniques
+    all_nodes = links.select("src").union(links.select("dst")).distinct()
+    ranks = all_nodes.select(col("src").alias("node")).withColumn("rank", lit(1.0))
 
-    # Build adjacency list
-    adj = links.groupBy("src").agg(collect_list("dst").alias("outlinks")).cache()
+    # Adjacency list
+    adj = links.groupBy("src").agg(collect_list("dst").alias("outlinks"))
 
-    ranks = adj.select(col("src").alias("node"), lit(1.0).alias("rank"))
-
+    # PageRank iterations
     for i in range(10):
-        contribs = adj.join(ranks, adj.src == ranks.node) \
+        contribs = adj.join(ranks, adj.src == ranks.node, how="right") \
             .select(
-                explode("outlinks").alias("dst"),
-                (col("rank") / size("outlinks")).alias("contrib")
+                explode(when(col("outlinks").isNotNull(), col("outlinks")).otherwise(array())).alias("dst"),
+                (col("rank") / size(coalesce("outlinks", lit([])))).alias("contrib")
             )
+
         ranks = contribs.groupBy("dst").sum("contrib") \
             .select(
                 col("dst").alias("node"),
                 (lit(0.15) + lit(0.85) * col("sum(contrib)")).alias("rank")
             )
 
-    ranks.write.mode("overwrite").csv(args.output)
-    spark.stop()
+    # Écriture finale
+    ranks.coalesce(1).write.mode("overwrite").option("header", "true").csv(args.output)
 
+    spark.stop()
 
 if __name__ == "__main__":
     main()
