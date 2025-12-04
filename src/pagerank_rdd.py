@@ -14,6 +14,10 @@ def parse_ttl(line):
     pred = parts[1]
     obj  = parts[2]
 
+    # We only want wikiPageWikiLink
+    if pred != "<http://dbpedia.org/ontology/wikiPageWikiLink>":
+        return None
+
     # Remove angle brackets, keep last part of URL
     def clean(uri):
         return uri[uri.rfind("/") + 1 : ].replace(">", "").replace("<", "")

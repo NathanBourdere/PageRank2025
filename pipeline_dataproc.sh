@@ -27,7 +27,7 @@ IMAGE_VERSION="${IMAGE_VERSION:-2.1-debian11}"
 # Paramètres pipeline
 NUM_CLUSTERS="${NUM_CLUSTERS:-3}"     # <--- nombre de clusters à créer
 MODE="${MODE:-df}"                   # "rdd" ou "df"
-INPUT_PATH="gs://${BUCKET}/data/wikilinks_lang=en.ttl.bz2"
+INPUT_PATH="gs://${BUCKET}/data/wikilinks_sampled_partition_0.ttl"
 
 # Chemins des jobs
 JOB_RDD="gs://${BUCKET}/jobs/page_rank_rdd.py"
@@ -129,8 +129,7 @@ for i in $(seq 1 "$NUM_CLUSTERS"); do
     --master-machine-type=e2-standard-4 \
     --num-workers="$NUM_WORKERS" \
     --worker-machine-type=e2-medium \
-    --num-workers=1 \
-    --disk-size=50 \
+    --worker-boot-disk-size=50 \
     --image-version="$IMAGE_VERSION"
 
     echo "Cluster $i créé."

@@ -23,6 +23,11 @@ def main():
         regexp_extract("value", r"<([^>]*)>.*<([^>]*)>.*<([^>]*)>", 3).alias("dst_full")
     )
 
+    # Keep only wikiPageWikiLink predicate
+    links = parsed.filter(
+        col("pred_full") == "http://dbpedia.org/ontology/wikiPageWikiLink"
+    )
+
     # Clean URIs to keep last part only
     links = links.selectExpr(
         "regexp_extract(src_full, '.*/([^/]*)$', 1) as src",
