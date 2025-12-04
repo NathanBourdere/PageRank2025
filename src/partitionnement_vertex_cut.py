@@ -4,7 +4,6 @@ from collections import defaultdict
 import sys
 import os
 import time
-from tqdm import tqdm
 
 def hash_uri(uri, num_partitions=10):
     """Hash cohérent pour assigner une URI à une partition"""
@@ -68,15 +67,6 @@ def partition_ttl_stream(input_file, output_prefix, sample_rate=0.1, num_partiti
         for i in range(num_partitions):
             partition_files[i] = open(f"{output_prefix}_partition_{i}.ttl", 'w', encoding='utf-8')
         
-        # Barre de progression
-        pbar = tqdm(
-            total=estimated_lines if estimated_lines else None,
-            desc="Traitement",
-            unit=" lignes",
-            unit_scale=True,
-            smoothing=0.1
-        )
-        
         with bz2.open(input_file, 'rt', encoding='utf-8') as f:
             current_subject = None
             subject_partition = None
@@ -85,7 +75,6 @@ def partition_ttl_stream(input_file, output_prefix, sample_rate=0.1, num_partiti
             
             for line in f:
                 total_triples += 1
-                pbar.update(1)
                 
                 # Ignorer les commentaires et lignes vides
                 if line.startswith('#') or line.strip() == '':
@@ -120,17 +109,13 @@ def partition_ttl_stream(input_file, output_prefix, sample_rate=0.1, num_partiti
                 current_time = time.time()
                 if current_time - last_update > 1.0:
                     rate = total_triples / (current_time - start_time)
-                    pbar.set_postfix({
-                        'sujets': len(sampled_subjects),
-                        'vitesse': f'{rate:.0f} l/s'
-                    })
+
                     last_update = current_time
             
             # Traiter le dernier sujet
             if current_subject and subject_lines and current_subject in sampled_subjects:
                 partition_files[subject_partition].writelines(subject_lines)
         
-        pbar.close()
     
     finally:
         # Fermer tous les fichiers
@@ -172,8 +157,7 @@ def partition_to_gcs(input_file, gcs_bucket, gcs_prefix, sample_rate=0.1, num_pa
     pass
 
 if __name__ == "__main__":
-    # Exemple d'utilisation
-    input_file = "wikilinks_lang=en.ttl.bz2"
+    input_file = "../wikilinks_lang=en.ttl.bz2"
     output_prefix = "wikilinks_sampled"
     
     partition_ttl_stream(
