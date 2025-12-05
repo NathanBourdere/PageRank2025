@@ -114,11 +114,11 @@ for i in $(seq 1 "$NUM_CLUSTERS"); do
 
   # Définir nombre de workers (chaque worker = un nœud)
   if [ "$i" -eq 1 ]; then
-    NUM_WORKERS=2   # 2 nœuds
+    NUM_WORKERS=6   # 2 nœuds
   elif [ "$i" -eq 2 ]; then
     NUM_WORKERS=4   # 4 nœuds
   else
-    NUM_WORKERS=6   # 6 nœuds
+    NUM_WORKERS=2   # 6 nœuds
   fi
 
   echo "Création cluster $i/${NUM_CLUSTERS} : $CLUSTER_NAME avec $NUM_WORKERS workers"
