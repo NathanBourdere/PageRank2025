@@ -18,8 +18,8 @@ fi
 ###########################
 # Defaults (si non overridés par .env)
 ###########################
-PROJECT_ID="${PROJECT_ID:-pagerank2025-nathan}"
-BUCKET="${BUCKET:-pagerank2025-nathan-bucket}"
+PROJECT_ID="${PROJECT_ID:-pagerank2025-479616}"
+BUCKET="${BUCKET:-pagerank2025-yannis-bucket}"
 REGION="${REGION:-europe-west1}"
 ZONE="${ZONE:-europe-west1}"
 IMAGE_VERSION="${IMAGE_VERSION:-2.1-debian11}"
