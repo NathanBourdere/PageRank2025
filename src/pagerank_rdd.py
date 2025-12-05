@@ -4,15 +4,16 @@ import time
 import json
 import re
 from pyspark.sql import SparkSession
-from pyspark import HashPartitioner
+
+# Compiler le regex une fois pour de meilleures performances
+PATTERN = re.compile(r'<([^>]+)>\s+<([^>]+)>\s+<([^>]+)>')
 
 def parse_ttl_line(line):
     """
     Parse une ligne TTL format: <src> <pred> <dst> .
     Retourne (src, dst) si pred == wikiPageWikiLink, sinon None
     """
-    # Regex pour extraire les 3 URIs entre < >
-    match = re.match(r'<([^>]+)>\s+<([^>]+)>\s+<([^>]+)>', line)
+    match = PATTERN.match(line)
     if not match:
         return None
     
@@ -78,13 +79,16 @@ def main():
     print(f"[INFO] Nombre de nœuds uniques : {num_nodes}")
 
     # Initialiser les ranks pour tous les nœuds
-    ranks = nodes.map(lambda n: (n, 1.0)).partitionBy(num_partitions)
+    ranks = nodes.map(lambda n: (n, 1.0)).partitionBy(num_partitions).persist()
 
     # Construire adjacency list : (src, [dst1, dst2, ...])
     print("[INFO] Construction de la liste d'adjacence...")
     links = edges.groupByKey(numPartitions=num_partitions).mapValues(list).partitionBy(num_partitions).cache()
     num_nodes_with_outlinks = links.count()
     print(f"[INFO] Nœuds avec liens sortants : {num_nodes_with_outlinks}")
+
+    # Créer une version partitionnée des nœuds pour les jointures
+    nodes_keyed = nodes.map(lambda n: (n, 0.15)).partitionBy(num_partitions).persist()
 
     # PageRank iterations
     print(f"[INFO] Démarrage de {args.iterations} itérations PageRank...")
@@ -101,12 +105,13 @@ def main():
         # Agréger les contributions par nœud destination
         new_ranks = contribs.reduceByKey(lambda x, y: x + y)
         
-        # CRITICAL FIX: Fusionner avec tous les nœuds pour éviter de perdre
-        # les nœuds sans liens entrants (dangling nodes)
-        # Stratégie: leftOuterJoin avec tous les nœuds
-        ranks = nodes.map(lambda n: (n, None)).partitionBy(num_partitions) \
-            .leftOuterJoin(new_ranks) \
-            .mapValues(lambda x: 0.15 + 0.85 * x[1] if x[1] is not None else 0.15)
+        # Fusionner avec tous les nœuds (rightOuterJoin pour garder tous les nœuds)
+        # Les nœuds sans liens entrants auront un rank de base (0.15)
+        ranks.unpersist()  # Libérer l'ancien RDD
+        ranks = new_ranks.rightOuterJoin(nodes_keyed) \
+            .mapValues(lambda x: 0.15 + 0.85 * x[0] if x[0] is not None else 0.15) \
+            .partitionBy(num_partitions) \
+            .persist()
         
         iter_time = time.time() - iter_start
         iteration_times.append(iter_time)
@@ -126,19 +131,17 @@ def main():
     
     # Sauvegarder tous les résultats avec header
     print(f"[INFO] Sauvegarde des résultats dans : {args.output}/ranks")
-    sorted_ranks.map(lambda x: f"{x[0]},{x[1]}") \
-        .coalesce(1) \
-        .saveAsTextFile(f"{args.output}/ranks")
-    
-    # Sauvegarder le header séparément (workaround pour CSV avec RDD)
-    sc.parallelize(["node,rank"]).coalesce(1).saveAsTextFile(f"{args.output}/header")
+    header_and_data = sc.parallelize(["node,rank"]).union(
+        sorted_ranks.map(lambda x: f"{x[0]},{x[1]}")
+    )
+    header_and_data.coalesce(1).saveAsTextFile(f"{args.output}/ranks")
     
     # Sauvegarder le top 100
     print(f"[INFO] Sauvegarde du top 100 dans : {args.output}/top100")
-    sc.parallelize(sorted_ranks.take(100)) \
-        .map(lambda x: f"{x[0]},{x[1]}") \
-        .coalesce(1) \
-        .saveAsTextFile(f"{args.output}/top100")
+    top100_with_header = sc.parallelize(["node,rank"]).union(
+        sc.parallelize(sorted_ranks.take(100)).map(lambda x: f"{x[0]},{x[1]}")
+    )
+    top100_with_header.coalesce(1).saveAsTextFile(f"{args.output}/top100")
     
     # Sauvegarder les métadonnées
     metadata = {
@@ -162,6 +165,14 @@ def main():
     
     print(f"[INFO] Métadonnées sauvegardées dans : {args.output}/metadata.json")
     print(f"[SUCCESS] PageRank terminé en {total_time:.2f}s avec {num_nodes} nœuds et {num_links} liens")
+    
+    # Nettoyage
+    ranks.unpersist()
+    nodes_keyed.unpersist()
+    edges.unpersist()
+    nodes.unpersist()
+    links.unpersist()
+    sorted_ranks.unpersist()
     
     spark.stop()
 
