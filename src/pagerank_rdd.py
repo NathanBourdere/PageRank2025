@@ -4,6 +4,7 @@ import time
 import json
 import re
 from pyspark.sql import SparkSession
+from pyspark import HashPartitioner
 
 def parse_ttl_line(line):
     """
@@ -58,7 +59,7 @@ def main():
     
     num_links = edges.count()
     print(f"[INFO] Nombre de liens wikiPageWikiLink uniques : {num_links}")
-    
+    num_partitions = 200
     if num_links == 0:
         print("[ERROR] Aucun lien wikiPageWikiLink trouvé après parsing !")
         spark.stop()
@@ -77,11 +78,11 @@ def main():
     print(f"[INFO] Nombre de nœuds uniques : {num_nodes}")
 
     # Initialiser les ranks pour tous les nœuds
-    ranks = nodes.map(lambda n: (n, 1.0))
+    ranks = nodes.map(lambda n: (n, 1.0)).partitionBy(num_partitions)
 
     # Construire adjacency list : (src, [dst1, dst2, ...])
     print("[INFO] Construction de la liste d'adjacence...")
-    links = edges.groupByKey().mapValues(list).cache()
+    links = edges.groupByKey(numPartitions=num_partitions).mapValues(list).partitionBy(num_partitions).cache()
     num_nodes_with_outlinks = links.count()
     print(f"[INFO] Nœuds avec liens sortants : {num_nodes_with_outlinks}")
 
@@ -103,7 +104,7 @@ def main():
         # CRITICAL FIX: Fusionner avec tous les nœuds pour éviter de perdre
         # les nœuds sans liens entrants (dangling nodes)
         # Stratégie: leftOuterJoin avec tous les nœuds
-        ranks = nodes.map(lambda n: (n, None)) \
+        ranks = nodes.map(lambda n: (n, None)).partitionBy(num_partitions) \
             .leftOuterJoin(new_ranks) \
             .mapValues(lambda x: 0.15 + 0.85 * x[1] if x[1] is not None else 0.15)
         
