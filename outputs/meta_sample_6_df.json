@@ -1,0 +1,24 @@
+{
+  "input_path": "gs://pagerank2025-yannis-bucket/data/wikilinks_sampled_partition_0.ttl",
+  "output_path": "gs://pagerank2025-yannis-bucket/outputs/pagerank-1764934081/cluster_1",
+  "num_iterations": 10,
+  "num_nodes": 278296,
+  "num_links": 360474,
+  "total_lines": 360495,
+  "parsed_lines": 360495,
+  "wikilink_lines": 360495,
+  "total_time_seconds": 82.95,
+  "avg_iteration_time_seconds": 0.23,
+  "iteration_times": [
+    0.36,
+    0.23,
+    0.25,
+    0.22,
+    0.21,
+    0.22,
+    0.23,
+    0.22,
+    0.21,
+    0.2
+  ]
+}
