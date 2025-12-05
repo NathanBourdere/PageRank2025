@@ -1,0 +1,4 @@
+Configuration,Nombre de runs,Nœuds,Liens,Temps total (s),Temps moyen/iter (s),Min temps (s),Max temps (s)
+meta_sample_2_df,1,278296 ± 0,360474 ± 0,85.91 ± 0.00,0.24 ± 0.00,85.91,85.91
+meta_sample_4_df,1,278296 ± 0,360474 ± 0,68.36 ± 0.00,0.27 ± 0.00,68.36,68.36
+meta_sample_6_df,1,278296 ± 0,360474 ± 0,82.95 ± 0.00,0.23 ± 0.00,82.95,82.95
