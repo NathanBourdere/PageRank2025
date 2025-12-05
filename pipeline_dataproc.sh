@@ -18,8 +18,8 @@ fi
 ###########################
 # Defaults (si non overridés par .env)
 ###########################
-PROJECT_ID="${PROJECT_ID:-pagerank2025-nathan}"
-BUCKET="${BUCKET:-pagerank2025-nathan-bucket}"
+PROJECT_ID="${PROJECT_ID:-pagerank2025-479616}"
+BUCKET="${BUCKET:-pagerank2025-yannis-bucket}"
 REGION="${REGION:-europe-west1}"
 ZONE="${ZONE:-europe-west1}"
 IMAGE_VERSION="${IMAGE_VERSION:-2.1-debian11}"
@@ -114,11 +114,11 @@ for i in $(seq 1 "$NUM_CLUSTERS"); do
 
   # Définir nombre de workers (chaque worker = un nœud)
   if [ "$i" -eq 1 ]; then
-    NUM_WORKERS=2   # 2 nœuds
+    NUM_WORKERS=6   # 2 nœuds
   elif [ "$i" -eq 2 ]; then
     NUM_WORKERS=4   # 4 nœuds
   else
-    NUM_WORKERS=6   # 6 nœuds
+    NUM_WORKERS=2   # 6 nœuds
   fi
 
   echo "Création cluster $i/${NUM_CLUSTERS} : $CLUSTER_NAME avec $NUM_WORKERS workers"
